@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: ppt-generator-v3
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
