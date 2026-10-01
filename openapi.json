@@ -1,70 +1,223 @@
 {
   "swagger": "2.0",
   "info": {
-    "version": "1.0",
-    "title": "PPT Generator API"
+    "title": "PPT Generator Connector V3",
+    "description": "Generates a PowerPoint presentation from the corporate template and returns a download link.",
+    "version": "3.0.0"
   },
-  "host": "ppt-generator-apiv3.onrender.com",
+  "host": "ppt-generator-v3.onrender.com",
   "basePath": "/",
-  "schemes": [
-    "https"
-  ],
-  "consumes": [
-    "application/json"
-  ],
-  "produces": [
-    "application/json"
-  ],
+  "schemes": ["https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
   "paths": {
     "/createppt": {
       "post": {
-        "operationId": "CreatePPT",
-        "summary": "Create PPT",
+        "operationId": "CreatePresentation",
+        "summary": "Create presentation",
+        "description": "Creates a .pptx file from the corporate template. Send the title and a list of slides. Returns a download link.",
+        "x-ms-visibility": "important",
         "parameters": [
           {
             "name": "body",
             "in": "body",
             "required": true,
-            "schema": {
-              "$ref": "#/definitions/PPTRequest"
-            }
+            "schema": { "$ref": "#/definitions/CreatePresentationRequest" }
           }
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Presentation created",
+            "schema": { "$ref": "#/definitions/CreatePresentationResponse" }
+          },
+          "default": {
+            "description": "Error",
+            "schema": { "$ref": "#/definitions/ErrorResponse" }
+          }
+        }
+      }
+    },
+    "/template-info": {
+      "get": {
+        "operationId": "GetTemplateInfo",
+        "summary": "Get template info",
+        "description": "Returns the template slide size, layouts, placeholders and the role-to-layout mapping. For diagnostics.",
+        "x-ms-visibility": "advanced",
+        "responses": {
+          "200": {
+            "description": "Template details",
+            "schema": { "type": "object", "additionalProperties": true }
+          },
+          "default": {
+            "description": "Error",
+            "schema": { "$ref": "#/definitions/ErrorResponse" }
           }
         }
       }
     }
   },
   "definitions": {
-    "PPTRequest": {
+    "CreatePresentationRequest": {
       "type": "object",
+      "required": ["presentationTitle", "slides"],
       "properties": {
         "presentationTitle": {
-          "type": "string"
+          "type": "string",
+          "title": "Presentation title",
+          "description": "Title shown on the cover slide."
+        },
+        "subtitle": {
+          "type": "string",
+          "title": "Subtitle",
+          "description": "Optional cover subtitle.",
+          "x-ms-visibility": "advanced"
+        },
+        "includeCover": {
+          "type": "boolean",
+          "title": "Include cover",
+          "description": "Add a cover slide automatically. Default true.",
+          "x-ms-visibility": "advanced"
+        },
+        "includeAgenda": {
+          "type": "boolean",
+          "title": "Include agenda",
+          "description": "Add an agenda slide automatically. Default false.",
+          "x-ms-visibility": "advanced"
+        },
+        "includeClosing": {
+          "type": "boolean",
+          "title": "Include closing",
+          "description": "Add a closing slide automatically. Default true.",
+          "x-ms-visibility": "advanced"
+        },
+        "closingTitle": {
+          "type": "string",
+          "title": "Closing title",
+          "x-ms-visibility": "advanced"
+        },
+        "closingMessage": {
+          "type": "string",
+          "title": "Closing message",
+          "x-ms-visibility": "advanced"
         },
         "slides": {
           "type": "array",
-          "items": {
-            "$ref": "#/definitions/Slide"
-          }
+          "title": "Slides",
+          "description": "Content slides, in order.",
+          "items": { "$ref": "#/definitions/Slide" }
         }
       }
     },
     "Slide": {
       "type": "object",
       "properties": {
-        "title": {
-          "type": "string"
+        "title": { "type": "string", "title": "Slide title" },
+        "layout": {
+          "type": "string",
+          "title": "Layout",
+          "description": "content, cards, rows, process, stats, comparison, two_column, chart, table, section, agenda or closing. Inferred from the data if omitted."
         },
         "content": {
           "type": "array",
+          "title": "Bullet points",
+          "items": { "type": "string" }
+        },
+        "subtitle": { "type": "string", "title": "Subtitle (section/closing)" },
+        "notes": { "type": "string", "title": "Speaker notes" },
+        "cards": {
+          "type": "array",
+          "title": "Cards",
+          "items": { "$ref": "#/definitions/TitleText" }
+        },
+        "rows": {
+          "type": "array",
+          "title": "Rows",
+          "items": { "$ref": "#/definitions/TitleText" }
+        },
+        "steps": {
+          "type": "array",
+          "title": "Process steps",
+          "items": { "$ref": "#/definitions/TitleText" }
+        },
+        "stats": {
+          "type": "array",
+          "title": "Statistics",
           "items": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "value": { "type": "string", "title": "Value" },
+              "label": { "type": "string", "title": "Label" }
+            }
+          }
+        },
+        "leftTitle": { "type": "string", "title": "Left heading" },
+        "leftPoints": { "type": "array", "title": "Left points", "items": { "type": "string" } },
+        "rightTitle": { "type": "string", "title": "Right heading" },
+        "rightPoints": { "type": "array", "title": "Right points", "items": { "type": "string" } },
+        "left": { "type": "array", "title": "Left column (two_column)", "items": { "type": "string" } },
+        "right": { "type": "array", "title": "Right column (two_column)", "items": { "type": "string" } },
+        "chart": {
+          "type": "object",
+          "title": "Chart",
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "column, horizontalbar, stackedcolumn, line, area, pie or doughnut"
+            },
+            "categories": { "type": "array", "items": { "type": "string" } },
+            "series": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "values": { "type": "array", "items": { "type": "number" } }
+                }
+              }
+            }
+          }
+        },
+        "bullets": {
+          "type": "array",
+          "title": "Chart commentary",
+          "items": { "type": "string" }
+        },
+        "table": {
+          "type": "object",
+          "title": "Table",
+          "properties": {
+            "headers": { "type": "array", "items": { "type": "string" } },
+            "rows": {
+              "type": "array",
+              "items": { "type": "array", "items": { "type": "string" } }
+            }
           }
         }
+      }
+    },
+    "TitleText": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "title": "Title" },
+        "text": { "type": "string", "title": "Text" }
+      }
+    },
+    "CreatePresentationResponse": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "title": "Status" },
+        "fileName": { "type": "string", "title": "File name" },
+        "downloadUrl": { "type": "string", "title": "Download URL" },
+        "slideCount": { "type": "integer", "format": "int32", "title": "Slide count" },
+        "warnings": { "type": "array", "title": "Warnings", "items": { "type": "string" } }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" },
+        "errorCode": { "type": "string" },
+        "message": { "type": "string" }
       }
     }
   }
