@@ -34,6 +34,7 @@ GET  /download/<filename>   download a generated presentation
 from __future__ import annotations
 
 import copy
+import io
 import json
 import logging
 import math
@@ -43,6 +44,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -61,6 +63,12 @@ from pptx.util import Emu, Pt
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+try:  # optional icon pack (icon_pack.py); the app works without it
+    from icon_pack import icon_png, pick_icon
+except Exception:  # pragma: no cover
+    icon_png = None
+    pick_icon = None
+
 # --------------------------------------------------------------------------- #
 # Configuration (all overridable with environment variables on Render)
 # --------------------------------------------------------------------------- #
@@ -71,6 +79,7 @@ OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", str(Path(tempfile.gettempdir()) /
 FILE_TTL_SECONDS = int(os.environ.get("FILE_TTL_SECONDS", "86400"))  # delete files after 24h
 MAX_SLIDES = int(os.environ.get("MAX_SLIDES", "60"))
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")  # e.g. https://my-app.onrender.com
+AUTO_DESIGN = os.environ.get("AUTO_DESIGN", "1") != "0"  # turn plain bullet slides into visual layouts
 KEEP_FOOTERS = os.environ.get("KEEP_FOOTERS", "1") != "0"  # copy slide-number/footer placeholders to slides
 
 EMU_PER_INCH = 914400
@@ -675,6 +684,8 @@ KIND_ALIASES = {
     "table": "table", "tables": "table", "tableslide": "table",
     "section": "section", "divider": "section", "sectionheader": "section", "sectionslide": "section",
     "chapter": "section",
+    "layers": "layers", "layer": "layers", "stack": "layers", "architecture": "layers",
+    "spotlight": "spotlight", "highlight": "spotlight", "keymessage": "spotlight", "intro": "spotlight",
     "agenda": "agenda", "contents": "agenda", "toc": "agenda", "agendaslide": "agenda",
     "closing": "closing", "closingslide": "closing", "thankyou": "closing", "thanks": "closing",
     "end": "closing", "final": "closing",
@@ -688,16 +699,30 @@ ROLE_FOR_KIND = {
     "closing": "closing",
     # custom-drawn layouts sit on a title-only layout (or the content layout as fallback)
     "cards": "title_only", "rows": "title_only", "process": "title_only", "stats": "title_only",
+    "layers": "title_only", "spotlight": "title_only",
 }
 
 
-def resolve_kind(spec: Dict[str, Any]) -> str:
-    for key in ("layout", "type", "slideType", "slide_type", "template", "style", "kind"):
+TAKEAWAY_KEYS = ("takeaway", "keyTakeaway", "key_takeaway", "callout")
+NO_TAKEAWAY = ("cover", "section", "closing", "agenda")
+LAYOUT_KEYS = ("layout", "type", "slideType", "slide_type", "template", "style", "kind")
+
+
+def explicit_kind(spec: Dict[str, Any]) -> Optional[str]:
+    """Slide kind named by the caller (layout/type/...), or None if not stated."""
+    for key in LAYOUT_KEYS:
         v = spec.get(key)
         if isinstance(v, str) and v.strip():
             kind = KIND_ALIASES.get(norm_key(v))
             if kind:
                 return kind
+    return None
+
+
+def resolve_kind(spec: Dict[str, Any]) -> str:
+    kind = explicit_kind(spec)
+    if kind:
+        return kind
     # Infer from the data present
     if pick(spec, ("chart", "chartData", "chart_data")) or (spec.get("categories") and spec.get("series")):
         return "chart"
@@ -705,6 +730,10 @@ def resolve_kind(spec: Dict[str, Any]) -> str:
         return "table"
     if pick(spec, ("stats", "statistics", "metrics", "kpis")):
         return "stats"
+    if pick(spec, ("layers",)):
+        return "layers"
+    if pick(spec, ("headline", "statement", "keyMessage")):
+        return "spotlight"
     if pick(spec, ("cards",)):
         return "cards"
     if pick(spec, ("steps", "process")):
@@ -755,6 +784,8 @@ class DeckBuilder:
         self.sh = int(prs.slide_height)
         self.scale = self.sw / REFERENCE_WIDTH
         self.warnings: List[str] = []
+        self.cur_layout: Any = None
+        self.bottom_reserve = 0  # space kept free for the takeaway banner
 
     # ---- units ----------------------------------------------------------- #
     def emu_in(self, inches: float) -> int:
@@ -768,6 +799,7 @@ class DeckBuilder:
     def new_slide(self, kind: str) -> Tuple[Any, Any]:
         choice = self.roles[ROLE_FOR_KIND[kind]]
         slide = self.prs.slides.add_slide(choice.layout)
+        self.cur_layout = choice.layout
         if KEEP_FOOTERS:
             self._clone_footer_placeholders(slide, choice.layout)
         return slide, choice.layout
@@ -845,12 +877,14 @@ class DeckBuilder:
         """Free area below the title and above the footer zone."""
         title = slide.shapes.title
         tr = shape_rect(title) if title is not None else None
-        if tr and tr.width >= 0.5 * self.sw:
-            left, width, top = tr.left, tr.width, tr.bottom + int(0.03 * self.sh)
+        if tr and tr.left < 0.1 * self.sw:
+            # content spans the full width inside the template's own left margin (title is narrower: logo sits right)
+            left, top = tr.left, tr.bottom + int(0.03 * self.sh)
+            width = self.sw - 2 * left
         else:
             left, width = int(0.06 * self.sw), int(0.88 * self.sw)
             top = tr.bottom + int(0.03 * self.sh) if tr else int(0.22 * self.sh)
-        bottom = max(self.footer_limit(layout), top + int(0.3 * self.sh))
+        bottom = max(self.footer_limit(layout) - self.bottom_reserve, top + int(0.3 * self.sh))
         return Rect(left, top, width, max(bottom - top, int(0.3 * self.sh)))
 
     def claim_region(self, slide: Any, layout: Any) -> Rect:
@@ -865,6 +899,9 @@ class DeckBuilder:
             r = shape_rect(ph)
             if r:
                 remove_shape(ph)
+                limit = self.footer_limit(layout) - self.bottom_reserve
+                if self.bottom_reserve and r.bottom > limit:
+                    r = Rect(r.left, r.top, r.width, max(limit - r.top, int(0.25 * self.sh)))
                 return r
         return self.default_region(slide, layout)
 
@@ -953,6 +990,7 @@ class DeckBuilder:
             return self.add_text(slide, target, paras)
 
         ph = target
+        self._apply_reserve(ph)
         tf = ph.text_frame
         tf.clear()
         first = True
@@ -971,6 +1009,16 @@ class DeckBuilder:
         if items:
             self._shrink_to_fit(ph, items, "body", 20)
         return ph
+
+    def _apply_reserve(self, ph: Any) -> None:
+        """Shorten a placeholder so it clears the takeaway banner."""
+        if not self.bottom_reserve:
+            return
+        r = shape_rect(ph)
+        limit = self.footer_limit(self.cur_layout) - self.bottom_reserve
+        if r and r.bottom > limit:
+            ph.left, ph.top, ph.width = Emu(r.left), Emu(r.top), Emu(r.width)
+            ph.height = Emu(max(limit - r.top, int(0.25 * self.sh)))
 
     # ---- finishing ------------------------------------------------------- #
     @staticmethod
@@ -995,6 +1043,9 @@ class DeckBuilder:
                 tf.text = notes
 
     def finish(self, slide: Any, spec: Dict[str, Any]) -> None:
+        take = clean(pick(spec, TAKEAWAY_KEYS), 160)
+        if take and self.bottom_reserve:
+            self.add_takeaway(slide, take)
         self.prune_empty_placeholders(slide)
         self.add_notes(slide, spec)
 
@@ -1148,32 +1199,76 @@ class DeckBuilder:
         self.add_text(slide, rect, [Para(t, size=pt, bullet=True, level=l, color=MSO_THEME_COLOR.DARK_1,
                                          space_after=pt * 0.4) for t, l in points])
 
-    # ---- cards / rows / process / stats --------------------------------- #
+    # ---- icons, numbered circles, takeaway banner ---------------------------- #
+    def add_icon(self, slide: Any, cx: int, cy: int, d: int, text: str, index: int,
+                 color: MSO_THEME_COLOR) -> Any:
+        """Theme-coloured circle with a white icon chosen from the text (see icon_pack.py)."""
+        circle = self.add_box(slide, Rect(cx - d // 2, cy - d // 2, d, d), color, shape=MSO_SHAPE.OVAL)
+        data = icon_png(pick_icon(text, index)) if icon_png and pick_icon else None
+        if data:
+            s = int(d * 0.52)
+            pic = slide.shapes.add_picture(io.BytesIO(data), Emu(cx - s // 2), Emu(cy - s // 2), Emu(s), Emu(s))
+            pic.name = "Icon"
+        return circle
+
+    def number_circle(self, slide: Any, cx: int, cy: int, d: int, number: int, color: MSO_THEME_COLOR,
+                      pt: float = 22) -> None:
+        circle = self.add_box(slide, Rect(cx - d // 2, cy - d // 2, d, d), color, shape=MSO_SHAPE.OVAL)
+        tf = circle.text_frame
+        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        tf.text = str(number)
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        for r in p.runs:
+            r.font.size = Pt(self.size(pt))
+            r.font.bold = True
+            r.font.color.theme_color = MSO_THEME_COLOR.LIGHT_1
+
+    def add_takeaway(self, slide: Any, text: str) -> None:
+        """Key-takeaway banner pinned above the footer zone."""
+        layout = self.cur_layout
+        r = self.default_region(slide, layout)
+        h = self.emu_in(0.72)
+        rect = Rect(r.left, self.footer_limit(layout) - h, r.width, h)
+        self.add_box(slide, rect, MSO_THEME_COLOR.ACCENT_2, shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.3)
+        d = self.emu_in(0.46)
+        self.add_icon(slide, rect.left + self.emu_in(0.4), rect.top + h // 2, d, "idea", 0, MSO_THEME_COLOR.ACCENT_1)
+        tx = Rect(rect.left + self.emu_in(0.8), rect.top, rect.width - self.emu_in(1.0), h)
+        pt = estimate_font_pt([(text, 0)], tx.width, tx.height, self.size(20), self.size(12))
+        self.add_text(slide, tx, [Para(text, size=pt, bold=True, color=MSO_THEME_COLOR.LIGHT_1)],
+                      anchor=MSO_ANCHOR.MIDDLE)
+
+    # ---- cards / rows / process / stats / layers / spotlight ----------------- #
     def build_cards(self, spec: Dict[str, Any], title: str) -> None:
         slide, layout = self.new_slide("cards")
         self.set_title(slide, title)
-        cards = norm_items(pick(spec, ("cards", "items", "points", "content")), 8)
+        cards = norm_items(pick(spec, ("cards", "items", "points", "content")), 6)
         region = self.claim_region(slide, layout)
         if cards:
             n = len(cards)
             cols = auto_cols(n, 3)
             rows = math.ceil(n / cols)
-            gap = self.emu_in(0.25)
+            gap = self.emu_in(0.28)
             cw = (region.width - gap * (cols - 1)) // cols
-            ch = min((region.height - gap * (rows - 1)) // rows, self.emu_in(3.4))
-            strip = self.emu_in(0.09)
+            ch = min((region.height - gap * (rows - 1)) // rows, self.emu_in(3.6))
+            pad = self.emu_in(0.25)
+            d = min(self.emu_in(0.72), ch // 3)
             for i, card in enumerate(cards):
                 r, c = divmod(i, cols)
                 rect = Rect(region.left + c * (cw + gap), region.top + r * (ch + gap), cw, ch)
                 accent = ACCENTS[i % len(ACCENTS)]
-                self.add_box(slide, rect, accent, tint=0.88)
-                self.add_box(slide, Rect(rect.left, rect.top, rect.width, strip), accent)
-                inner = Rect(rect.left, rect.top + strip, rect.width, rect.height - strip).inset(self.emu_in(0.1))
-                items = [(card["title"], 0), (card["text"], 0)]
-                pt = estimate_font_pt([x for x in items if x[0]], inner.width, inner.height, self.size(20), self.size(10))
+                self.add_box(slide, rect, accent, tint=0.9, shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.06)
+                self.add_icon(slide, rect.left + pad + d // 2, rect.top + pad + d // 2, d,
+                              f"{card['title']} {card['text']}", i, accent)
+                top = rect.top + pad + d + gap // 2
+                inner = Rect(rect.left + pad, top, cw - 2 * pad, max(rect.bottom - pad - top, 1))
+                items = [x for x in ((card["title"], 0), (card["text"], 0)) if x[0]]
+                pt = estimate_font_pt(items, inner.width, inner.height, self.size(20), self.size(10))
                 paras = []
                 if card["title"]:
-                    paras.append(Para(card["title"], size=pt + 3, bold=True, color=MSO_THEME_COLOR.DARK_1, space_after=6))
+                    paras.append(Para(card["title"], size=pt + (3 if card["text"] else 1), bold=bool(card["text"]),
+                                      color=MSO_THEME_COLOR.DARK_1, space_after=6))
                 if card["text"]:
                     paras.append(Para(card["text"], size=pt, color=MSO_THEME_COLOR.DARK_1))
                 self.add_text(slide, inner, paras)
@@ -1182,29 +1277,32 @@ class DeckBuilder:
     def build_rows(self, spec: Dict[str, Any], title: str) -> None:
         slide, layout = self.new_slide("rows")
         self.set_title(slide, title)
-        rows = norm_items(pick(spec, ("rows", "items", "points", "content")), 7)
+        rows = norm_items(pick(spec, ("rows", "items", "points", "content")), 6)
         region = self.claim_region(slide, layout)
         if rows:
             n = len(rows)
-            gap = self.emu_in(0.15)
-            rh = min((region.height - gap * (n - 1)) // n, self.emu_in(1.1))
-            bar_w = self.emu_in(0.14)
+            gap = self.emu_in(0.16)
+            rh = min((region.height - gap * (n - 1)) // n, self.emu_in(1.15))
+            d = min(int(rh * 0.6), self.emu_in(0.62))
+            pad = self.emu_in(0.22)
             for i, row in enumerate(rows):
                 rect = Rect(region.left, region.top + i * (rh + gap), region.width, rh)
                 accent = ACCENTS[i % len(ACCENTS)]
-                self.add_box(slide, rect, accent, tint=0.9)
-                self.add_box(slide, Rect(rect.left, rect.top, bar_w, rect.height), accent)
-                inner = Rect(rect.left + bar_w, rect.top, rect.width - bar_w, rect.height).inset(self.emu_in(0.12), self.emu_in(0.04))
+                self.add_box(slide, rect, accent, tint=0.92, shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.2)
+                self.number_circle(slide, rect.left + pad + d // 2, rect.top + rh // 2, d, i + 1, accent, 20)
+                left = rect.left + pad + d + pad
+                inner = Rect(left, rect.top, rect.right - left - pad, rh).inset(0, self.emu_in(0.04))
                 if row["text"]:
-                    a, b = inner.split_h(0.32, self.emu_in(0.15))
+                    a, b = inner.split_h(0.32, self.emu_in(0.2))
                     pt = estimate_font_pt([(row["text"], 0)], b.width, b.height, self.size(20), self.size(10))
                     self.add_text(slide, a, [Para(row["title"], size=min(self.size(22), pt + 3), bold=True,
                                                   color=MSO_THEME_COLOR.DARK_1)], anchor=MSO_ANCHOR.MIDDLE)
                     self.add_text(slide, b, [Para(row["text"], size=pt, color=MSO_THEME_COLOR.DARK_1)],
                                   anchor=MSO_ANCHOR.MIDDLE)
                 else:
-                    self.add_text(slide, inner, [Para(row["title"], size=self.size(18), bold=True,
-                                                      color=MSO_THEME_COLOR.DARK_1)], anchor=MSO_ANCHOR.MIDDLE)
+                    pt = estimate_font_pt([(row["title"], 0)], inner.width, inner.height, self.size(22), self.size(11))
+                    self.add_text(slide, inner, [Para(row["title"], size=pt, color=MSO_THEME_COLOR.DARK_1)],
+                                  anchor=MSO_ANCHOR.MIDDLE)
         self.finish(slide, spec)
 
     def build_process(self, spec: Dict[str, Any], title: str) -> None:
@@ -1215,8 +1313,9 @@ class DeckBuilder:
         if steps:
             n = len(steps)
             step_w = region.width // n
-            dia = min(self.emu_in(0.85), int(step_w * 0.55))
-            cy = region.top + dia // 2 + self.emu_in(0.1)
+            dia = min(self.emu_in(1.0), int(step_w * 0.55))
+            block = dia + self.emu_in(0.2) + self.emu_in(1.9)  # circle + gap + text
+            cy = region.top + max(self.emu_in(0.1), (region.height - block) // 2) + dia // 2  # centre vertically
             if n > 1:  # connector first so circles sit on top of it
                 line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,
                                                   Emu(region.left + step_w // 2), Emu(cy),
@@ -1225,27 +1324,17 @@ class DeckBuilder:
                 line.line.width = Pt(max(2.0, 3 * self.scale))
             for i, step in enumerate(steps):
                 cx = region.left + i * step_w + step_w // 2
-                accent = ACCENTS[i % len(ACCENTS)]
-                circle = self.add_box(slide, Rect(cx - dia // 2, cy - dia // 2, dia, dia), accent, shape=MSO_SHAPE.OVAL)
-                tf = circle.text_frame
-                tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
-                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-                tf.text = str(i + 1)
-                p = tf.paragraphs[0]
-                p.alignment = PP_ALIGN.CENTER
-                for r in p.runs:
-                    r.font.size = Pt(self.size(24))
-                    r.font.bold = True
-                    r.font.color.theme_color = MSO_THEME_COLOR.LIGHT_1
-                top = cy + dia // 2 + self.emu_in(0.15)
-                box = Rect(cx - step_w // 2, top, step_w, max(region.bottom - top, self.emu_in(0.8))).inset(self.emu_in(0.06), 0)
+                self.number_circle(slide, cx, cy, dia, i + 1, ACCENTS[i % len(ACCENTS)], 24)
+                top = cy + dia // 2 + self.emu_in(0.2)
+                box = Rect(cx - step_w // 2, top, step_w, max(region.bottom - top, self.emu_in(0.8))).inset(self.emu_in(0.08), 0)
                 items = [x for x in ((step["title"], 0), (step["text"], 0)) if x[0]]
                 pt = estimate_font_pt(items, box.width, box.height, self.size(18), self.size(10))
                 paras = []
                 if step["title"]:
-                    paras.append(Para(step["title"], size=pt + 2, bold=True, align=PP_ALIGN.CENTER, space_after=4))
+                    paras.append(Para(step["title"], size=pt + (2 if step["text"] else 0), bold=bool(step["text"]),
+                                      color=MSO_THEME_COLOR.DARK_1, align=PP_ALIGN.CENTER, space_after=4))
                 if step["text"]:
-                    paras.append(Para(step["text"], size=pt, align=PP_ALIGN.CENTER))
+                    paras.append(Para(step["text"], size=pt, color=MSO_THEME_COLOR.DARK_1, align=PP_ALIGN.CENTER))
                 self.add_text(slide, box, paras)
         self.finish(slide, spec)
 
@@ -1258,18 +1347,16 @@ class DeckBuilder:
             n = len(stats)
             cols = auto_cols(n, 4)
             rows = math.ceil(n / cols)
-            gap = self.emu_in(0.25)
+            gap = self.emu_in(0.28)
             cw = (region.width - gap * (cols - 1)) // cols
-            ch = min((region.height - gap * (rows - 1)) // rows, self.emu_in(2.6))
-            strip = self.emu_in(0.09)
+            ch = min((region.height - gap * (rows - 1)) // rows, self.emu_in(2.8))
             for i, st in enumerate(stats):
                 r, c = divmod(i, cols)
                 rect = Rect(region.left + c * (cw + gap), region.top + r * (ch + gap), cw, ch)
                 accent = ACCENTS[i % len(ACCENTS)]
-                self.add_box(slide, rect, accent, tint=0.9)
-                self.add_box(slide, Rect(rect.left, rect.top, rect.width, strip), accent)
-                inner = Rect(rect.left, rect.top + strip, rect.width, rect.height - strip).inset(self.emu_in(0.1))
-                vsize = self.size(44 if cols <= 3 else 36)
+                self.add_box(slide, rect, accent, tint=0.92, shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.06)
+                inner = rect.inset(self.emu_in(0.15))
+                vsize = self.size(48 if cols <= 3 else 40)
                 # shrink the big number if it is very long (e.g. "$2.5 trillion")
                 vsize = min(vsize, max(self.size(18), inner.width / 12700.0 / max(len(st["value"]), 1) / 0.6))
                 paras = []
@@ -1279,6 +1366,76 @@ class DeckBuilder:
                     lp = estimate_font_pt([(st["label"], 0)], inner.width, int(inner.height * 0.45), self.size(20), self.size(10))
                     paras.append(Para(st["label"], size=lp, color=MSO_THEME_COLOR.DARK_1, align=PP_ALIGN.CENTER))
                 self.add_text(slide, inner, paras, anchor=MSO_ANCHOR.MIDDLE)
+        self.finish(slide, spec)
+
+    def build_layers(self, spec: Dict[str, Any], title: str) -> None:
+        """Stacked architecture-style diagram: coloured layers joined by arrows."""
+        slide, layout = self.new_slide("layers")
+        self.set_title(slide, title)
+        layers = norm_items(pick(spec, ("layers", "items", "points", "content")), 5)
+        region = self.claim_region(slide, layout)
+        if layers:
+            n = len(layers)
+            arrow_h = self.emu_in(0.26) if n > 1 else 0
+            lh = min((region.height - arrow_h * (n - 1)) // n, self.emu_in(1.15))
+            colors = [MSO_THEME_COLOR.ACCENT_2, MSO_THEME_COLOR.ACCENT_5, MSO_THEME_COLOR.ACCENT_1,
+                      MSO_THEME_COLOR.ACCENT_4, MSO_THEME_COLOR.ACCENT_3]
+            pad = self.emu_in(0.3)
+            for i, layer in enumerate(layers):
+                rect = Rect(region.left, region.top + i * (lh + arrow_h), region.width, lh)
+                self.add_box(slide, rect, colors[i % len(colors)], shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.18)
+                inner = Rect(rect.left + pad, rect.top, rect.width - 2 * pad, lh).inset(0, self.emu_in(0.04))
+                if layer["text"]:
+                    a, b = inner.split_h(0.3, self.emu_in(0.25))
+                    pt = estimate_font_pt([(layer["text"], 0)], b.width, b.height, self.size(20), self.size(10))
+                    self.add_text(slide, a, [Para(layer["title"], size=min(self.size(22), pt + 3), bold=True,
+                                                  color=MSO_THEME_COLOR.LIGHT_1)], anchor=MSO_ANCHOR.MIDDLE)
+                    self.add_text(slide, b, [Para(layer["text"], size=pt, color=MSO_THEME_COLOR.LIGHT_1)],
+                                  anchor=MSO_ANCHOR.MIDDLE)
+                else:
+                    pt = estimate_font_pt([(layer["title"], 0)], inner.width, inner.height, self.size(22), self.size(11))
+                    self.add_text(slide, inner, [Para(layer["title"], size=pt, bold=True, color=MSO_THEME_COLOR.LIGHT_1)],
+                                  anchor=MSO_ANCHOR.MIDDLE)
+                if i < n - 1:
+                    aw = self.emu_in(0.34)
+                    ay = rect.bottom + self.emu_in(0.03)
+                    self.add_box(slide, Rect(region.left + region.width // 2 - aw // 2, ay, aw, arrow_h - self.emu_in(0.06)),
+                                 MSO_THEME_COLOR.ACCENT_1, tint=0.4, shape=MSO_SHAPE.DOWN_ARROW)
+        self.finish(slide, spec)
+
+    def build_spotlight(self, spec: Dict[str, Any], title: str) -> None:
+        """Key message on a colour panel (left) with supporting points (right)."""
+        slide, layout = self.new_slide("spotlight")
+        self.set_title(slide, title)
+        pts = [t for t, _ in to_points(pick(spec, ("content", "points", "bullets", "items")))]
+        headline = clean(pick(spec, ("headline", "statement", "keyMessage")), 200)
+        if not headline and pts:
+            headline = pts.pop(0)
+        region = self.claim_region(slide, layout)
+        if headline:
+            gap = self.emu_in(0.35)
+            pw = int(region.width * (0.38 if pts else 0.7))
+            panel = Rect(region.left, region.top, pw, min(region.height, self.emu_in(4.6)))
+            self.add_box(slide, panel, MSO_THEME_COLOR.ACCENT_2, shape=MSO_SHAPE.ROUNDED_RECTANGLE, rounded=0.05)
+            pad = self.emu_in(0.35)
+            d = self.emu_in(1.1)
+            self.add_icon(slide, panel.left + pad + d // 2, panel.top + pad + d // 2, d, f"{title} {headline}", 0,
+                          MSO_THEME_COLOR.ACCENT_1)
+            top = panel.top + pad + d + self.emu_in(0.25)
+            hb = Rect(panel.left + pad, top, pw - 2 * pad, max(panel.bottom - pad - top, 1))
+            pt = estimate_font_pt([(headline, 0)], hb.width, hb.height, self.size(28), self.size(14))
+            self.add_text(slide, hb, [Para(headline, size=pt, bold=True, color=MSO_THEME_COLOR.LIGHT_1)])
+            if pts:
+                pts = pts[:5]
+                right = Rect(panel.right + gap, region.top, region.width - pw - gap, panel.height)
+                rh = min(right.height // len(pts), self.emu_in(1.0))
+                d2 = min(self.emu_in(0.5), int(rh * 0.6))
+                for i, text in enumerate(pts):
+                    row = Rect(right.left, right.top + i * rh, right.width, rh)
+                    self.add_icon(slide, row.left + d2 // 2, row.top + rh // 2, d2, "check benefit", i, ACCENTS[i % len(ACCENTS)])
+                    tb = Rect(row.left + d2 + self.emu_in(0.25), row.top, row.width - d2 - self.emu_in(0.25), rh)
+                    tp = estimate_font_pt([(text, 0)], tb.width, tb.height, self.size(22), self.size(11))
+                    self.add_text(slide, tb, [Para(text, size=tp, color=MSO_THEME_COLOR.DARK_1)], anchor=MSO_ANCHOR.MIDDLE)
         self.finish(slide, spec)
 
     # ---- chart ------------------------------------------------------------ #
@@ -1492,7 +1649,88 @@ class DeckBuilder:
 
     # ---- dispatch --------------------------------------------------------- #
     def build(self, kind: str, spec: Dict[str, Any], title: str) -> None:
-        getattr(self, f"build_{kind}")(spec, title)
+        wants_banner = kind not in NO_TAKEAWAY and bool(pick(spec, TAKEAWAY_KEYS))
+        self.bottom_reserve = self.emu_in(0.95) if wants_banner else 0
+        try:
+            getattr(self, f"build_{kind}")(spec, title)
+        finally:
+            self.bottom_reserve = 0
+
+
+# --------------------------------------------------------------------------- #
+# Auto-design: turn plain bullet slides into visual layouts
+# --------------------------------------------------------------------------- #
+# The Copilot agent often sends only {"title", "content": [bullets]}. Rather than
+# render every slide as a text list, pick a visual layout from the title wording
+# and the shape of the bullets, and avoid repeating the same layout back to back.
+KW_PROCESS = ("implementation", "approach", "roadmap", "steps", "phase", "journey", "methodology", "how it works",
+              "how to", "getting started", "next steps", "workflow", "lifecycle", "stages", "timeline", "adoption",
+              "plan", "process")
+KW_CARDS = ("capabilit", "feature", "benefit", "use case", "pillar", "component", "offering", "solution", "principle",
+            "types", "options", "areas", "highlights", "advantage", "drivers", "themes", "services", "key ", "value")
+KW_LAYERS = ("architecture", "stack", "layers", "framework", "landscape", "reference model", "building blocks")
+KW_SPOTLIGHT = ("what is", "what are", "overview", "introduction", "about", "why ", "executive summary", "context",
+                "background", "vision", "opportunity")
+PAIR_RE = re.compile(r"^(.*?)\s*(?:\bvs\.?\b|\bversus\b|\band\b|&)\s*(.*)$", re.I)
+COMPARE_RE = re.compile(r"\b(vs\.?|versus)\b|\b(and|&)\s+(considerations?|challenges?|risks?|limitations?|drawbacks?|cons)\b"
+                        r"|pros and cons|before and after|today and tomorrow", re.I)
+NUMBER_RE = re.compile(r"\d+(\.\d+)?\s*(%|x\b|k\b|m\b|b\b|million|billion|trillion)|[$\u20ac\u00a3\u20b9]\s?\d", re.I)
+AGENDA_TITLES = {"agenda", "agenda overview", "contents", "table of contents", "outline"}
+CLOSING_TITLES = {"thank you", "thanks", "thank you!", "questions", "q&a", "questions & discussion", "questions and discussion"}
+
+
+def auto_design(title: str, spec: Dict[str, Any], prev_kind: str, content_seen: int) -> Tuple[str, Dict[str, Any]]:
+    """Return (kind, spec) for a slide that came in as plain bullets."""
+    raw_points = to_points(pick(spec, ("content", "points", "bullets", "items", "text")))
+    if not raw_points or any(level > 0 for _, level in raw_points):
+        return "content", spec  # nothing to design, or the caller used nested bullets deliberately
+    bullets = [t for t, _ in raw_points]
+    n = len(bullets)
+    avg = sum(len(b) for b in bullets) / n
+    if avg > 120:
+        return "content", spec  # paragraph-style text reads best as plain text
+    t = title.lower()
+    cands: List[str] = []
+    if 2 <= n <= 6 and sum(1 for b in bullets if NUMBER_RE.search(b)) >= max(2, n - 1):
+        cands.append("stats")
+    if COMPARE_RE.search(t) and n >= 2:
+        cands.append("comparison")
+    if any(k in t for k in KW_LAYERS) and 3 <= n <= 5:
+        cands.append("layers")
+    if any(k in t for k in KW_PROCESS) and 3 <= n <= 6:
+        cands.append("process")
+    if any(k in t for k in KW_CARDS) and 3 <= n <= 6:
+        cands.append("cards")
+    if any(k in t for k in KW_SPOTLIGHT) and 2 <= n <= 6:
+        cands.append("spotlight")
+    if content_seen == 0 and 2 <= n <= 6:
+        cands.append("spotlight")  # the first content slide is usually the "what / why"
+    if 3 <= n <= 6:
+        cands += ["cards", "rows", "spotlight"]
+    elif n == 2:
+        cands += ["spotlight", "two_column"]
+    elif n > 6:
+        cands += ["two_column"]
+    else:
+        cands += ["spotlight"]
+    kind = next((c for c in cands if c != prev_kind), cands[0])
+
+    new = dict(spec)
+    if kind == "stats":
+        new["stats"] = bullets
+    elif kind == "comparison":
+        m = PAIR_RE.match(title)
+        half = math.ceil(n / 2)
+        lt, rt = (clean(m.group(1), 60), clean(m.group(2), 60)) if m and m.group(1) and m.group(2) else ("", "")
+        new["columns"] = [{"title": lt, "points": bullets[:half]}, {"title": rt, "points": bullets[half:]}]
+    elif kind == "two_column":
+        half = math.ceil(n / 2)
+        new["columns"] = [{"points": bullets[:half]}, {"points": bullets[half:]}]
+    elif kind in ("cards", "rows", "process", "layers"):
+        new[kind if kind != "process" else "steps"] = bullets
+    elif kind == "spotlight":
+        new["content"] = bullets
+    return kind, new
 
 
 # --------------------------------------------------------------------------- #
@@ -1540,13 +1778,30 @@ def generate_presentation(payload: Any) -> Tuple[str, int, List[str]]:
     roles = discover_layouts(prs)
     builder = DeckBuilder(prs, roles)
 
+    auto = truthy(payload.get("autoDesign"), AUTO_DESIGN)
     plan: List[Tuple[str, Dict[str, Any], str]] = []
-    for spec in specs:
-        plan.append((resolve_kind(spec), spec, clean(pick(spec, ("title", "heading", "name")), 200)))
+    prev_kind, content_seen = "cover", 0
+    for pos, spec in enumerate(specs):
+        slide_title = clean(pick(spec, ("title", "heading", "name")), 200)
+        kind = resolve_kind(spec)
+        if kind == "content" and explicit_kind(spec) is None:
+            low = slide_title.lower().strip()
+            if low in AGENDA_TITLES:
+                kind = "agenda"
+            elif low in CLOSING_TITLES and pos == len(specs) - 1:
+                kind = "closing"
+            elif auto:
+                kind, spec = auto_design(slide_title, spec, prev_kind, content_seen)
+                content_seen += 1
+        plan.append((kind, spec, slide_title))
+        prev_kind = kind
 
     # Cover: added automatically unless the caller supplied a cover slide first.
     if truthy(payload.get("includeCover"), True) and not (plan and plan[0][0] == "cover"):
-        plan.insert(0, ("cover", {"subtitle": payload.get("subtitle")}, title))
+        default_sub = os.environ.get("DEFAULT_COVER_SUBTITLE")  # set to "" on Render to disable
+        if default_sub is None:
+            default_sub = datetime.now().strftime("%B %Y")
+        plan.insert(0, ("cover", {"subtitle": payload.get("subtitle") or default_sub}, title))
 
     # Agenda: automatic only if requested; an explicit agenda slide without items is auto-filled.
     sections = [t for k, _, t in plan if k == "section" and t]
