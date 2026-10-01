@@ -1,4 +1,6 @@
-Flask==3.0.3
+Flask>=3.0,<4
+gunicorn>=22.0
 python-pptx==1.0.2
-gunicorn==23.0.0
-Werkzeug==3.0.4
+lxml>=5.0
+Pillow>=10.0
+XlsxWriter>=3.1
