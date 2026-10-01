@@ -7,9 +7,15 @@
   },
   "host": "ppt-generator-v3.onrender.com",
   "basePath": "/",
-  "schemes": ["https"],
-  "consumes": ["application/json"],
-  "produces": ["application/json"],
+  "schemes": [
+    "https"
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
   "paths": {
     "/createppt": {
       "post": {
@@ -22,17 +28,23 @@
             "name": "body",
             "in": "body",
             "required": true,
-            "schema": { "$ref": "#/definitions/CreatePresentationRequest" }
+            "schema": {
+              "$ref": "#/definitions/CreatePresentationRequest"
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "Presentation created",
-            "schema": { "$ref": "#/definitions/CreatePresentationResponse" }
+            "schema": {
+              "$ref": "#/definitions/CreatePresentationResponse"
+            }
           },
           "default": {
             "description": "Error",
-            "schema": { "$ref": "#/definitions/ErrorResponse" }
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
           }
         }
       }
@@ -46,11 +58,16 @@
         "responses": {
           "200": {
             "description": "Template details",
-            "schema": { "type": "object", "additionalProperties": true }
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
           },
           "default": {
             "description": "Error",
-            "schema": { "$ref": "#/definitions/ErrorResponse" }
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
           }
         }
       }
@@ -59,7 +76,10 @@
   "definitions": {
     "CreatePresentationRequest": {
       "type": "object",
-      "required": ["presentationTitle", "slides"],
+      "required": [
+        "presentationTitle",
+        "slides"
+      ],
       "properties": {
         "presentationTitle": {
           "type": "string",
@@ -104,40 +124,65 @@
           "type": "array",
           "title": "Slides",
           "description": "Content slides, in order.",
-          "items": { "$ref": "#/definitions/Slide" }
+          "items": {
+            "$ref": "#/definitions/Slide"
+          }
+        },
+        "autoDesign": {
+          "type": "boolean",
+          "title": "Auto design",
+          "description": "Turn plain bullet slides into visual layouts. Default true.",
+          "x-ms-visibility": "advanced"
         }
       }
     },
     "Slide": {
       "type": "object",
       "properties": {
-        "title": { "type": "string", "title": "Slide title" },
+        "title": {
+          "type": "string",
+          "title": "Slide title"
+        },
         "layout": {
           "type": "string",
           "title": "Layout",
-          "description": "content, cards, rows, process, stats, comparison, two_column, chart, table, section, agenda or closing. Inferred from the data if omitted."
+          "description": "content, cards, rows, process, stats, layers, spotlight, comparison, two_column, chart, table, section, agenda or closing. If omitted, the service chooses a visual layout automatically."
         },
         "content": {
           "type": "array",
           "title": "Bullet points",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "subtitle": { "type": "string", "title": "Subtitle (section/closing)" },
-        "notes": { "type": "string", "title": "Speaker notes" },
+        "subtitle": {
+          "type": "string",
+          "title": "Subtitle (section/closing)"
+        },
+        "notes": {
+          "type": "string",
+          "title": "Speaker notes"
+        },
         "cards": {
           "type": "array",
           "title": "Cards",
-          "items": { "$ref": "#/definitions/TitleText" }
+          "items": {
+            "$ref": "#/definitions/TitleText"
+          }
         },
         "rows": {
           "type": "array",
           "title": "Rows",
-          "items": { "$ref": "#/definitions/TitleText" }
+          "items": {
+            "$ref": "#/definitions/TitleText"
+          }
         },
         "steps": {
           "type": "array",
           "title": "Process steps",
-          "items": { "$ref": "#/definitions/TitleText" }
+          "items": {
+            "$ref": "#/definitions/TitleText"
+          }
         },
         "stats": {
           "type": "array",
@@ -145,17 +190,53 @@
           "items": {
             "type": "object",
             "properties": {
-              "value": { "type": "string", "title": "Value" },
-              "label": { "type": "string", "title": "Label" }
+              "value": {
+                "type": "string",
+                "title": "Value"
+              },
+              "label": {
+                "type": "string",
+                "title": "Label"
+              }
             }
           }
         },
-        "leftTitle": { "type": "string", "title": "Left heading" },
-        "leftPoints": { "type": "array", "title": "Left points", "items": { "type": "string" } },
-        "rightTitle": { "type": "string", "title": "Right heading" },
-        "rightPoints": { "type": "array", "title": "Right points", "items": { "type": "string" } },
-        "left": { "type": "array", "title": "Left column (two_column)", "items": { "type": "string" } },
-        "right": { "type": "array", "title": "Right column (two_column)", "items": { "type": "string" } },
+        "leftTitle": {
+          "type": "string",
+          "title": "Left heading"
+        },
+        "leftPoints": {
+          "type": "array",
+          "title": "Left points",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rightTitle": {
+          "type": "string",
+          "title": "Right heading"
+        },
+        "rightPoints": {
+          "type": "array",
+          "title": "Right points",
+          "items": {
+            "type": "string"
+          }
+        },
+        "left": {
+          "type": "array",
+          "title": "Left column (two_column)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "right": {
+          "type": "array",
+          "title": "Right column (two_column)",
+          "items": {
+            "type": "string"
+          }
+        },
         "chart": {
           "type": "object",
           "title": "Chart",
@@ -164,14 +245,26 @@
               "type": "string",
               "description": "column, horizontalbar, stackedcolumn, line, area, pie or doughnut"
             },
-            "categories": { "type": "array", "items": { "type": "string" } },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "series": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string" },
-                  "values": { "type": "array", "items": { "type": "number" } }
+                  "name": {
+                    "type": "string"
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  }
                 }
               }
             }
@@ -180,17 +273,46 @@
         "bullets": {
           "type": "array",
           "title": "Chart commentary",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "table": {
           "type": "object",
           "title": "Table",
           "properties": {
-            "headers": { "type": "array", "items": { "type": "string" } },
+            "headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "rows": {
               "type": "array",
-              "items": { "type": "array", "items": { "type": "string" } }
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
+          }
+        },
+        "takeaway": {
+          "type": "string",
+          "title": "Key takeaway",
+          "description": "One-line message shown in a banner at the bottom of the slide."
+        },
+        "headline": {
+          "type": "string",
+          "title": "Headline (spotlight)",
+          "description": "Key message shown on the colour panel of a spotlight slide."
+        },
+        "layers": {
+          "type": "array",
+          "title": "Layers (architecture diagram)",
+          "items": {
+            "$ref": "#/definitions/TitleText"
           }
         }
       }
@@ -198,26 +320,57 @@
     "TitleText": {
       "type": "object",
       "properties": {
-        "title": { "type": "string", "title": "Title" },
-        "text": { "type": "string", "title": "Text" }
+        "title": {
+          "type": "string",
+          "title": "Title"
+        },
+        "text": {
+          "type": "string",
+          "title": "Text"
+        }
       }
     },
     "CreatePresentationResponse": {
       "type": "object",
       "properties": {
-        "status": { "type": "string", "title": "Status" },
-        "fileName": { "type": "string", "title": "File name" },
-        "downloadUrl": { "type": "string", "title": "Download URL" },
-        "slideCount": { "type": "integer", "format": "int32", "title": "Slide count" },
-        "warnings": { "type": "array", "title": "Warnings", "items": { "type": "string" } }
+        "status": {
+          "type": "string",
+          "title": "Status"
+        },
+        "fileName": {
+          "type": "string",
+          "title": "File name"
+        },
+        "downloadUrl": {
+          "type": "string",
+          "title": "Download URL"
+        },
+        "slideCount": {
+          "type": "integer",
+          "format": "int32",
+          "title": "Slide count"
+        },
+        "warnings": {
+          "type": "array",
+          "title": "Warnings",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "ErrorResponse": {
       "type": "object",
       "properties": {
-        "status": { "type": "string" },
-        "errorCode": { "type": "string" },
-        "message": { "type": "string" }
+        "status": {
+          "type": "string"
+        },
+        "errorCode": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
       }
     }
   }
